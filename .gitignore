@@ -1,0 +1,9 @@
+# Never commit tracker records or backups
+*.csv
+*.xlsx
+*.xls
+*.db
+*.db-*
+JustWalk-backup-*.json
+uploads/
+backups/
