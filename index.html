@@ -1,0 +1,294 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>JustWalk — Browser Tracker</title>
+  <script crossorigin src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
+  <script src="https://cdn.tailwindcss.com/3.4.17"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.8/dist/chart.umd.min.js"></script>
+  <script src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone@7.26.9/babel.min.js"></script>
+  <style>
+    :root{font-family:"Segoe UI",Arial,sans-serif;color:#16191f;background:#f2f3f3;font-size:14px}
+    body{margin:0}button,input,select{font:inherit}button,a,input,select{touch-action:manipulation}
+    button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible,summary:focus-visible{outline:3px solid #0972d3;outline-offset:3px}
+    button:disabled{opacity:.5;cursor:not-allowed}a{color:#0972d3}a:hover{text-decoration:underline}
+    .card{background:#fff;border:1px solid #d5dbdb;border-radius:12px;box-shadow:0 1px 2px #0000000d}
+    .btn{display:inline-flex;align-items:center;justify-content:center;gap:7px;border:1px solid #0972d3;border-radius:20px;padding:7px 16px;font-weight:700;color:#0972d3;background:white;cursor:pointer;white-space:nowrap}
+    .btn:hover{background:#f0f7ff}.primary{background:#ff9900;border-color:#d67f00;color:#16191f}.primary:hover{background:#ec8d00}
+    .field{display:flex;flex-direction:column;gap:6px;font-weight:600}.field input,.field select{background:white;border:1px solid #7d8998;border-radius:6px;padding:8px 10px;min-height:38px;font-weight:400}
+    table{width:100%;border-collapse:collapse;text-align:left;white-space:nowrap}th{background:#fafafa;color:#414d5c;font-size:12px}th,td{padding:12px 14px;border-bottom:1px solid #eaeded}tbody tr:hover{background:#f4f9ff}td{font-variant-numeric:tabular-nums}th button{font-weight:700;background:none;border:0;padding:0;cursor:pointer;text-align:left}
+    .scroll{overflow:auto;max-height:560px}thead{position:sticky;top:0;z-index:1}.muted{color:#5f6b7a}.icon{display:inline-flex;vertical-align:middle}.icon svg{width:18px;height:18px}
+    dialog{width:min(1200px,94vw);max-height:90vh;border:0;border-radius:14px;padding:0;box-shadow:0 20px 80px #0004}dialog::backdrop{background:#0f1b2c99}dialog .body{padding:20px;overflow:auto;max-height:75vh}
+    .skip{position:fixed;top:-100px;left:16px;z-index:100;background:#fff;padding:12px}.skip:focus{top:10px}
+    @media(prefers-reduced-motion:reduce){*{animation:none!important;scroll-behavior:auto!important}}
+  </style>
+</head>
+<body>
+<div id="root"><p style="padding:24px">Loading JustWalk… Internet access is required for the interface libraries.</p></div>
+<noscript>Enable JavaScript to use JustWalk.</noscript>
+<script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
+<script>
+const LocalTracker = (() => {
+  const headers = ["Work Week","Date","AA'ID","Job ID","Task ID","Job URL","Start Time","End Time","SPL (min)","Frames","Total Labels","Person","Robot","No Annotation","Unsure","Pre-labeled","Added","Deleted","Final Count","SPL/Label (sec)","Status","Duplicate"];
+  const counts = ['Frames','Total Labels','Person','Robot','No Annotation','Unsure','Pre-labeled','Added','Deleted','Final Count'];
+  const round = n => Math.round((n+Number.EPSILON)*100)/100;
+  const key = r => JSON.stringify([r.Date,r["AA'ID"],r['Job ID']]);
+  const now = () => new Date().toISOString();
+  const empty = () => ({version:1,uploads:[],changes:[]});
+  let dbPromise;
+  function open() {
+    if (!dbPromise) dbPromise = new Promise((resolve,reject) => {
+      if (!globalThis.indexedDB) return reject(Error('Browser storage is unavailable. Use a normal Chrome or Edge window.'));
+      const r=indexedDB.open('justwalk-browser-v1',1);
+      r.onupgradeneeded=()=>r.result.createObjectStore('workspace');
+      r.onerror=()=>{dbPromise=null;reject(Error('Cannot open browser storage. Check browser permissions.'))};
+      r.onblocked=()=>reject(Error('Close other JustWalk tabs, then reload.'));
+      r.onsuccess=()=>{r.result.onversionchange=()=>r.result.close();resolve(r.result)};
+    });
+    return dbPromise;
+  }
+  async function transaction(update) {
+    const db=await open();
+    return new Promise((resolve,reject)=>{
+      const tx=db.transaction('workspace',update?'readwrite':'readonly'),store=tx.objectStore('workspace');
+      let result, failure;
+      const r=store.get('state');
+      r.onsuccess=()=>{try{const state=r.result||empty();result=update?update(state):state;if(update)store.put(state,'state')}catch(e){failure=e;tx.abort()}};
+      tx.oncomplete=()=>resolve(result);
+      tx.onabort=tx.onerror=()=>reject(failure||Error('Data was not saved. Browser storage may be full or disabled. Export a backup before clearing any browser data.'));
+    });
+  }
+  function day(value) {
+    let s=String(value).trim(), y,m,d,match;
+    if(match=s.match(/^(\d{4})[-/](\d{2})[-/](\d{2})(?:[ T].*)?$/))[,y,m,d]=match;
+    else if(match=s.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})$/))[,d,m,y]=match;
+    else throw Error('Date must be DD-MM-YYYY or YYYY-MM-DD');
+    const result=`${y}-${String(m).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+    const dt=new Date(result+'T00:00:00Z');
+    if(!Number.isFinite(dt.getTime())||dt.toISOString().slice(0,10)!==result)throw Error('Invalid calendar date');
+    return result;
+  }
+  function week(s){const d=new Date(s+'T00:00:00Z');d.setUTCDate(d.getUTCDate()+4-(d.getUTCDay()||7));return Math.ceil((((d-new Date(Date.UTC(d.getUTCFullYear(),0,1)))/86400000)+1)/7)}
+  function csv(text) {
+    const rows=[];let row=[],field='',quoted=false,closed=false;
+    text=text.replace(/^\uFEFF/,'');
+    for(let i=0;i<text.length;i++){
+      const c=text[i];
+      if(quoted){if(c==='"'){if(text[i+1]==='"'){field+='"';i++}else{quoted=false;closed=true}}else field+=c;continue}
+      if(c==='"'){if(field||closed)throw Error('Malformed CSV quoting');quoted=true}
+      else if(c===','||c==='\n'||c==='\r'){row.push(field);field='';closed=false;if(c!==','){if(c==='\r'&&text[i+1]==='\n')i++;if(row.some(v=>v!==''))rows.push(row);row=[]}}
+      else{if(closed)throw Error('Unexpected text after CSV quote');field+=c}
+    }
+    if(quoted)throw Error('Unclosed CSV quote');
+    row.push(field);if(row.some(v=>v!==''))rows.push(row);return rows;
+  }
+  function normalize(table){
+    if(!table.length||JSON.stringify(table[0])!==JSON.stringify(headers))throw Error('Headers must match the required 22 columns in order.');
+    if(table.length<2||table.length>50001)throw Error('File must contain 1–50,000 data rows.');
+    const records=new Map();let skipped=0,collapsed=0;
+    table.slice(1).forEach((cells,i)=>{
+      try{
+        if(cells.length!==22)throw Error('Expected exactly 22 columns');
+        const r=Object.fromEntries(headers.map((h,j)=>[h,String(cells[j]??'').trim()]));
+        if(r.Duplicate.toLowerCase()==='yes'){skipped++;return}
+        if(r.Duplicate.toLowerCase()!=='no')throw Error('Duplicate must be Yes or No');
+        r.Date=day(r.Date);r["AA'ID"]=r["AA'ID"].toLowerCase();
+        if(!/^[a-z0-9._@-]{1,80}$/.test(r["AA'ID"]))throw Error("Invalid AA'ID");
+        for(const h of ['Job ID','Task ID']){if(!/^\d{1,20}$/.test(r[h])||BigInt(r[h])<1n)throw Error('Invalid '+h);r[h]=BigInt(r[h]).toString()}
+        for(const h of ['Work Week',...counts,'SPL (min)','SPL/Label (sec)']){if(!r[h]||!Number.isFinite(Number(r[h]))||Number(r[h])<0||Number(r[h])>1e9)throw Error('Invalid '+h);r[h]=Number(r[h]);if((counts.includes(h)||h==='Work Week')&&!Number.isInteger(r[h]))throw Error(h+' must be an integer')}
+        if(r['Work Week']<1||r['Work Week']>53)throw Error('Work Week must be 1–53');
+        for(const h of ['Start Time','End Time'])if(!/^(0?[1-9]|1[0-2]):[0-5]\d:[0-5]\d (AM|PM)$/i.test(r[h]))throw Error(h+' must use hh:mm:ss AM/PM');
+        if(!/^https:\/\/justwalk-cvat\.rayasu\.people\.amazon\.dev\/tasks\/\d+\/jobs\/\d+\/?$/.test(r['Job URL']))throw Error('Invalid CVAT HTTPS job URL');
+        r.Status=r.Status.toLowerCase().replace(/[\s_-]+/g,' ');
+        if(!/^[a-z][a-z ]{0,39}$/.test(r.Status))throw Error('Invalid status');
+        r.Duplicate='No';if(records.has(key(r)))collapsed++;records.set(key(r),r);
+      }catch(e){throw Error(`Row ${i+2}: ${e.message}. Import cancelled; no rows saved.`)}
+    });return {records:[...records.values()],skipped,collapsed};
+  }
+  async function parse(file){
+    if(!file.size||file.size>10*1024*1024||! /\.(csv|xlsx)$/i.test(file.name))throw Error('Choose a CSV or XLSX file up to 10 MB.');
+    if(/\.csv$/i.test(file.name))return normalize(csv(await file.text()));
+    if(!globalThis.XLSX)throw Error('Excel library unavailable. Check your connection or upload CSV.');
+    const book=XLSX.read(await file.arrayBuffer(),{type:'array',cellDates:false,sheetRows:50002});
+    return normalize(XLSX.utils.sheet_to_json(book.Sheets[book.SheetNames[0]],{header:1,raw:false,defval:'',blankrows:false}));
+  }
+  function adjust(records,changes=[]){
+    if(!Array.isArray(changes)||changes.length>50000)throw Error('Invalid adjustments');
+    const copy=structuredClone(records),map=new Map(copy.map(r=>[key(r),r])),seen=new Set();
+    for(const a of changes){const k=JSON.stringify([a.source_date,a.aa,a.job]),r=map.get(k);if(!r||seen.has(k))throw Error('Select each job from this file once');seen.add(k);const target=day(a.date),n=Number(a.subtract);if(target<r.Date||a.subtract===''||!Number.isFinite(n)||n<0||n>r['SPL (min)'])throw Error('Invalid reporting date or minutes to subtract');r['CSV Date']=r.Date;r['CSV SPL (min)']=r['SPL (min)'];r['Subtracted Minutes']=n;r.Date=target;r['Work Week']=week(target);r['SPL (min)']=Math.max(0,Math.round((r['SPL (min)']-n)*1e9)/1e9);r['SPL/Label (sec)']=r['Final Count']?round(r['SPL (min)']*60/r['Final Count']):null}
+    if(new Set(copy.map(key)).size!==copy.length)throw Error('Two rows would become the same job on the same date');return copy;
+  }
+  function jobs(state){const map=new Map();for(const upload of state.uploads)for(const r of upload.records)map.set(key(r),r);return [...map.values()].sort((a,b)=>b.Date.localeCompare(a.Date)||a["AA'ID"].localeCompare(b["AA'ID"])||a['Job ID'].localeCompare(b['Job ID']))}
+  function selected(rows,p){return rows.filter(r=>(!p.get('day')||r.Date===p.get('day'))&&(!p.get('week')||r['Work Week']===Number(p.get('week')))&&(!p.get('aa')||r["AA'ID"]===p.get('aa').toLowerCase())&&(!p.get('month')||r.Date.startsWith(p.get('month')))&&(!p.get('year')||r.Date.startsWith(p.get('year')+'-'))&&(!p.get('status')||p.get('status')==='all'||r.Status.replace(/ /g,'')===p.get('status').replace(/ /g,'')))}
+  function metrics(rows){const sum=h=>rows.reduce((n,r)=>n+r[h],0),minutes=sum('SPL (min)'),final=sum('Final Count'),people=new Set(rows.map(r=>r["AA'ID"])).size,progress=rows.filter(r=>r.Status.replace(/ /g,'')==='inprogress').length,n=rows.filter(r=>r.Status==='new').length,c=rows.filter(r=>r.Status==='completed').length;return {jobs:rows.length,new:n,completed:c,in_progress:progress,other:rows.length-n-c-progress,minutes:round(minutes),ph:round(minutes/60),final,person:sum('Person'),robot:sum('Robot'),frames:sum('Frames'),pre:sum('Pre-labeled'),added:sum('Added'),deleted:sum('Deleted'),associates:people,avg_ph:people?round(minutes/60/people):0,spl:final?round(minutes*60/final):null}}
+  function rollups(rows){const groups=new Map();for(const r of rows){const k=JSON.stringify([r.Date,r["AA'ID"]]);if(!groups.has(k))groups.set(k,[]);groups.get(k).push(r)}return [...groups.values()].map(g=>({day:g[0].Date,aa:g[0]["AA'ID"],week:[...new Set(g.map(r=>r['Work Week']))].sort((a,b)=>a-b).join(', '),...metrics(g)}))}
+  function change(state,action,detail){state.changes.push({created:now(),action,work_day:'',detail})}
+  function preview(state,parsed,changes){const records=adjust(parsed.records,changes),existing=new Set(jobs(state).map(key)),rows=records.map(r=>({day:r.Date,start_day:r.Date,aa:r["AA'ID"],job:r['Job ID'],status:r.Status,minutes:r['SPL (min)'],action:existing.has(key(r))?'Update':'Add',source_date:r['CSV Date']||r.Date,original_minutes:r['CSV SPL (min)']??r['SPL (min)'],subtracted:r['Subtracted Minutes']||0}));return {records,rows,adjustments:changes,work_day:'',suggested_date:parsed.records.map(r=>r.Date).sort().at(-1)||'',dates:[...new Set(records.map(r=>r.Date))].sort(),associates:[...new Set(records.map(r=>r["AA'ID"]))].sort(),summary:metrics(records),inserted:rows.filter(r=>r.action==='Add').length,updated:rows.filter(r=>r.action==='Update').length,skipped:parsed.skipped,collapsed:parsed.collapsed}}
+  function saveBlob(blob,name){const url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=name;document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),30000)}
+  function excel(rows,p){
+    if(!globalThis.XLSX)throw Error('Excel library unavailable. Reload with internet access.');
+    const map={week:'Work Week',day:'Date',aa:"AA'ID",jobs:'Jobs Count',in_progress:'In Progress Jobs',ph:'PH (hrs)',minutes:'Total SPL (min)',final:'Final Shape Count',person:'Person',robot:'Robot',frames:'Frames',pre:'Pre-labeled',added:'Added',deleted:'Deleted',spl:'SPL/Label (sec)'};
+    const book=XLSX.utils.book_new();
+    const datasets=[['Associate Summary',[Object.values(map),...rollups(rows).map(r=>Object.keys(map).map(k=>r[k]))]],['Jobs',[[...headers,'CSV Date','CSV SPL (min)','Subtracted Minutes'],...rows.map(r=>[...headers,'CSV Date','CSV SPL (min)','Subtracted Minutes'].map(k=>r[k]??''))]],['Report Info',[['Setting','Value'],...p.entries(),['Generated UTC',now()],['Storage','This browser only; no automatic synchronization']]]];
+    for(const [name,data] of datasets){const sheet=XLSX.utils.aoa_to_sheet(data);sheet['!cols']=data[0].map(()=>({wch:22}));if(data.length>1)sheet['!autofilter']={ref:sheet['!ref']};XLSX.utils.book_append_sheet(book,sheet,name)}
+    return new Blob([XLSX.write(book,{bookType:'xlsx',type:'array'})],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
+  }
+  async function request(path,options={}){
+    if(options.signal?.aborted)throw new DOMException('Aborted','AbortError');
+    const url=new URL(path,'https://local.invalid'),p=url.searchParams;
+    if(url.pathname==='/api/upload'){
+      const file=options.body.get('file'),parsed=await parse(file),changes=JSON.parse(options.body.get('adjustments')||'[]');
+      if(p.get('preview')==='true')return preview(await transaction(),parsed,changes);
+      const blob=new Blob([await file.arrayBuffer()],{type:file.type});
+      const result=await transaction(state=>{const result=preview(state,parsed,changes);state.uploads.push({id:crypto.randomUUID(),name:file.name,created:now(),records:result.records,adjustments:changes,blob});change(state,result.updated?'Updated':'Uploaded',`${result.inserted} jobs added; ${result.updated} updated; ${result.skipped} marked duplicates skipped. PH recalculated.`);return result});
+      navigator.storage?.persist?.().catch(()=>{});return result;
+    }
+    if(url.pathname.startsWith('/api/uploads/')&&options.method==='DELETE')return transaction(state=>{const id=url.pathname.split('/').at(-1);if(!state.uploads.some(u=>u.id===id))throw Error('Upload not found');state.uploads=state.uploads.filter(u=>u.id!==id);change(state,'Deleted','An uploaded file was removed. Jobs and daily PH recalculated.');return {deleted:id}});
+    const state=await transaction(),all=jobs(state),rows=selected(all,p),page=Math.max(1,Number(p.get('page'))||1);
+    switch(url.pathname){
+      case '/api/options':return {dates:[...new Set(all.map(r=>r.Date))].sort().reverse(),weeks:[...new Set(all.map(r=>r['Work Week']))].sort((a,b)=>b-a),associates:[...new Set(all.map(r=>r["AA'ID"]))].sort()};
+      case '/api/dashboard':return {summary:metrics(rows),rollups:rollups(rows)};
+      case '/api/jobs':return {rows:rows.slice((page-1)*25,page*25),total:rows.length};
+      case '/api/changes':return {rows:[...state.changes].reverse().slice((page-1)*25,page*25),total:state.changes.length};
+      case '/api/uploads':return [...state.uploads].reverse().filter(u=>(!p.get('day')&&!p.get('aa'))||selected(u.records,p).length).map(u=>({id:u.id,name:u.name,created:u.created,rows:u.records.length}));
+      case '/api/export':return excel(rows,p);
+      default:throw Error('Unknown local operation');
+    }
+  }
+  async function raw(id){const state=await transaction(),u=state.uploads.find(u=>u.id===id);if(!u)throw Error('Original file not found');saveBlob(u.blob,u.name)}
+  async function backup(){
+    const state=await transaction(),uploads=[];
+    for(const u of state.uploads){const bytes=new Uint8Array(await u.blob.arrayBuffer());let binary='';for(let i=0;i<bytes.length;i+=32768)binary+=String.fromCharCode(...bytes.subarray(i,i+32768));uploads.push({id:u.id,name:u.name,created:u.created,adjustments:u.adjustments,base64:btoa(binary)})}
+    saveBlob(new Blob([JSON.stringify({format:'justwalk-browser',version:1,uploads,changes:state.changes})],{type:'application/json'}),'JustWalk-backup-'+now().slice(0,10)+'.json');
+  }
+  async function inspectBackup(file){
+    if(file.size>100*1024*1024)throw Error('Backup must be under 100 MB. Transfer original CSV files for larger collections.');
+    const value=JSON.parse(await file.text());if(value.format!=='justwalk-browser'||value.version!==1||!Array.isArray(value.uploads)||value.uploads.length>1000)throw Error('Unsupported backup file');
+    const uploads=[],ids=new Set();let count=0;
+    for(const u of value.uploads){if(typeof u.id!=='string'||u.id.length>80||ids.has(u.id)||typeof u.name!=='string'||u.name.length>255||typeof u.base64!=='string'||u.base64.length>14*1024*1024||!Number.isFinite(Date.parse(u.created)))throw Error('Invalid backup upload');ids.add(u.id);const bytes=Uint8Array.from(atob(u.base64),c=>c.charCodeAt(0));const f=new File([bytes],u.name);const parsed=await parse(f);count+=parsed.records.length;if(count>200000)throw Error('Backup exceeds 200,000 rows');uploads.push({id:u.id,name:u.name,created:u.created,blob:new Blob([bytes]),adjustments:u.adjustments||[],records:adjust(parsed.records,u.adjustments||[])})}
+    return {uploads,count};
+  }
+  async function mergeBackup(prepared){return transaction(state=>{const ids=new Set(state.uploads.map(u=>u.id));let added=0;for(const u of prepared.uploads)if(!ids.has(u.id)){state.uploads.push(u);ids.add(u.id);added++}change(state,'Imported',`${added} original uploads merged from a backup. Existing upload IDs skipped. Imported jobs take precedence for matching date, associate and job IDs. Deletions are not synchronized.`);return added})}
+  return {request,raw,backup,inspectBackup,mergeBackup,metrics,normalize,adjust,csv,day,transaction};
+})();
+
+</script>
+<script type="text/babel">
+const {useState,useEffect,useRef}=React;
+const fmt=(n,d=0)=>n===null||n===undefined?'—':Number(n).toLocaleString(undefined,{minimumFractionDigits:d,maximumFractionDigits:d});
+const query=f=>new URLSearchParams(Object.entries(f).filter(([,v])=>v!==''&&v!==null&&v!==undefined)).toString();
+async function api(path,options={}){return LocalTracker.request(path,options)}
+function BrowserStorage({onRefresh}){
+ const input=useRef(),[busy,setBusy]=useState(false),[error,setError]=useState(''),[pending,setPending]=useState(null),[message,setMessage]=useState('');
+ async function run(fn){setBusy(true);setError('');setMessage('');try{await fn()}catch(e){setError(e.message)}finally{setBusy(false)}}
+ return <section className="card p-5 space-y-3"><h2 className="font-bold text-lg">Saved on this browser · No automatic sync</h2><p className="muted">Associates: download a backup and send it to your manager through your approved sharing channel. Managers: import each associate’s backup to combine records here. All dates, original files and minute adjustments are included. You can also import original CSVs using Associate View.</p><p className="muted">Each laptop and browser has separate records. Clearing site data or using private browsing can erase them. Keep downloaded backups. Workspace views do not restrict access on this laptop.</p><div className="flex flex-wrap gap-3"><button className="btn" disabled={busy} onClick={()=>run(()=>LocalTracker.backup())}><Icon name="Download"/> Download backup / Share data</button><button className="btn" disabled={busy} onClick={()=>input.current.click()}><Icon name="Upload"/> Import backup</button><input ref={input} type="file" accept=".json" className="hidden" aria-label="Import JustWalk backup" onChange={e=>{const f=e.target.files[0];e.target.value='';if(f)run(async()=>setPending(await LocalTracker.inspectBackup(f)))}}/></div>{busy&&<p role="status">Processing local files…</p>}{error&&<p role="alert" className="text-red-700">{error}</p>}{message&&<p role="status">{message}</p>}{pending&&<Modal title="Merge backup into this browser" onClose={()=>{if(!busy)setPending(null)}}><p>This backup contains {pending.uploads.length} uploads and {pending.count} job rows. Previously imported upload IDs are skipped. New imports update matching date, associate and job IDs. Existing unrelated records remain. Deletions on another laptop do not delete data here. This transfers records and adjustments; this browser keeps its own Changes history.</p><div className="flex gap-3 mt-4"><button className="btn" disabled={busy} onClick={()=>setPending(null)}>Cancel</button><button className="btn primary" disabled={busy} onClick={()=>run(async()=>{const n=await LocalTracker.mergeBackup(pending);setPending(null);await onRefresh();setMessage(`${n} uploads merged. See Changes for details.`)})}>Merge data</button></div></Modal>}</section>;
+}
+function Icon({name}){
+  const ref=useRef();
+  useEffect(()=>{if(window.lucide&&lucide.icons[name]){ref.current.replaceChildren(lucide.createElement(lucide.icons[name],{'aria-hidden':'true'}))}},[name]);
+  return <span className="icon" ref={ref} aria-hidden="true"/>;
+}
+function Pager({page,setPage,total,size=25}){
+  const pages=Math.max(1,Math.ceil(total/size));
+  return <div className="flex items-center justify-between gap-3 p-4 muted"><span>{fmt(total)} records · Page {page} of {pages}</span><div className="flex gap-2"><button className="btn" disabled={page<=1} onClick={()=>setPage(page-1)}>Previous</button><button className="btn" disabled={page>=pages} onClick={()=>setPage(page+1)}>Next</button></div></div>;
+}
+function Modal({title,onClose,children}){
+  const ref=useRef();
+  useEffect(()=>{const previous=document.activeElement;ref.current.showModal();return()=>{ref.current?.close();previous?.focus()}},[]);
+  return <dialog ref={ref} aria-labelledby="modal-title" onCancel={e=>{e.preventDefault();onClose()}}><div className="flex justify-between items-center gap-4 p-5 border-b"><h2 id="modal-title" className="text-xl font-bold">{title}</h2><button autoFocus className="btn" onClick={onClose} aria-label="Close dialog"><Icon name="X"/> Close</button></div><div className="body">{children}</div></dialog>;
+}
+function Jobs({filters,revision=0}){
+  const [result,setResult]=useState({rows:[],total:0}),[page,setPage]=useState(1),[error,setError]=useState(''),[loading,setLoading]=useState(true);
+  const key=query(filters);
+  useEffect(()=>setPage(1),[key,revision]);
+  useEffect(()=>{const controller=new AbortController();setLoading(true);setError('');api('/api/jobs?'+key+'&page='+page,{signal:controller.signal}).then(setResult).catch(e=>{if(e.name!=='AbortError')setError(e.message)}).finally(()=>{if(!controller.signal.aborted)setLoading(false)});return()=>controller.abort()},[key,page,revision]);
+  if(error)return <p role="alert" className="p-5 text-red-700">{error}</p>;
+  return <div aria-busy={loading}>{loading?<p className="p-6 muted" role="status">Loading jobs…</p>:<><div className="scroll"><table aria-label="CVAT job details"><thead><tr>{['Date','Associate','Job / Task','Status','Start → End','SPL (min)','CSV date','CSV minutes','Subtracted min','Frames','Final shapes','Person / Robot','Pre-labeled','Added / Deleted','SPL/Label (sec)'].map(x=><th scope="col" key={x}>{x}</th>)}</tr></thead><tbody>{result.rows.map(r=><tr key={[r.Date,r["AA'ID"],r['Job ID']].join('|')}><td>{r.Date}</td><td>{r["AA'ID"]}</td><td><a target="_blank" rel="noopener noreferrer" href={r['Job URL']}>{r['Job ID']} ↗</a><div className="text-xs muted">Task {r['Task ID']}</div></td><td><span className={r.Status==='completed'?'text-green-800 font-semibold':'muted'}>{({'new':'New','in progress':'In Progress','in_progress':'In Progress','in-progress':'In Progress','inprogress':'In Progress','completed':'Completed'})[r.Status]||r.Status}</span></td><td>{r['Start Time']} → {r['End Time']}</td><td>{fmt(r['SPL (min)'],2)}</td><td>{r['CSV Date']||r.Date}</td><td>{fmt(r['CSV SPL (min)']??r['SPL (min)'],2)}</td><td>{fmt(r['Subtracted Minutes']||0,2)}</td><td>{fmt(r.Frames)}</td><td>{fmt(r['Final Count'])}</td><td>{fmt(r.Person)} / {fmt(r.Robot)}</td><td>{fmt(r['Pre-labeled'])}</td><td>{fmt(r.Added)} / {fmt(r.Deleted)}</td><td>{r['Final Count']?fmt(r['SPL (min)']*60/r['Final Count'],2):'—'}</td></tr>)}</tbody></table></div>{!result.total&&<p className="p-8 text-center muted">No jobs match these filters.</p>}<Pager page={page} setPage={setPage} total={result.total}/></>}</div>;
+}
+function RawFiles({group,onDeleted}){
+  const [files,setFiles]=useState(null),[error,setError]=useState(''),[pending,setPending]=useState(null),[deleting,setDeleting]=useState(false);
+  useEffect(()=>{const controller=new AbortController();api('/api/uploads?'+query(group||{}),{signal:controller.signal}).then(setFiles).catch(e=>{if(e.name!=='AbortError')setError(e.message)});return()=>controller.abort()},[group]);
+  async function removeFile(){
+    if(!pending||deleting)return;
+    setDeleting(true);setError('');
+    try{await api('/api/uploads/'+pending.id,{method:'DELETE'});setFiles(current=>current.filter(f=>f.id!==pending.id));setPending(null);await onDeleted(pending.name)}catch(e){setError(e.message)}finally{setDeleting(false)}
+  }
+  return <><p className="muted mb-4">Original files may contain several associates or dates. Deleting a file removes its imported data across all dates and associates. Earlier surviving uploads of the same jobs are restored.</p>{error&&<p role="alert" className="text-red-700 mb-4">{error}</p>}{pending&&<section role="alert" className="rounded-lg border border-red-300 bg-red-50 p-4 mb-4"><h3 className="font-bold">Delete {pending.name}?</h3><p className="mt-2 mb-4">This permanently deletes the original file and recalculates jobs and production hours from the remaining uploads. This cannot be undone.</p><div className="flex gap-2"><button className="btn" disabled={deleting} onClick={()=>setPending(null)}>Cancel</button><button className="btn" style={{color:'#b42318',borderColor:'#b42318'}} disabled={deleting} onClick={removeFile}>{deleting?'Deleting…':'Delete file permanently'}</button></div></section>}{files===null?<p role="status">Loading uploads…</p>:!files.length?<p>No original files found.</p>:<ul className="divide-y">{files.map(f=><li key={f.id} className="py-4 flex flex-wrap gap-4 items-center justify-between"><div><strong className="break-all">{f.name}</strong><p className="muted text-sm">{new Date(f.created).toLocaleString()} · {fmt(f.rows)} accepted unique rows</p></div><div className="flex gap-2"><button className="btn" onClick={()=>LocalTracker.raw(f.id).catch(e=>setError(e.message))}><Icon name="Download"/> Download original</button><button className="btn" style={{color:'#b42318',borderColor:'#b42318'}} disabled={deleting} onClick={()=>{setPending(f);setError('')}}><Icon name="Trash2"/> Delete</button></div></li>)}</ul>}</>;
+}
+function ChartPanel({rows}){
+  const canvas=useRef();
+  useEffect(()=>{if(!window.Chart||!canvas.current)return;const grouped={};rows.forEach(r=>grouped[r.aa]=(grouped[r.aa]||0)+r.minutes);const entries=Object.entries(grouped).sort((a,b)=>b[1]-a[1]).slice(0,12);const chart=new Chart(canvas.current,{type:'bar',data:{labels:entries.map(x=>x[0]),datasets:[{label:'Production hours',data:entries.map(x=>+(x[1]/60).toFixed(2)),backgroundColor:'#0972d3',borderRadius:4,maxBarThickness:44}]},options:{responsive:true,maintainAspectRatio:false,animation:false,plugins:{legend:{display:false}},scales:{y:{beginAtZero:true,title:{display:true,text:'Production hours'}},x:{grid:{display:false}}}}});return()=>chart.destroy()},[rows]);
+  return <section className="card p-5"><h2 className="font-bold text-lg">Production hours by associate</h2><p className="muted text-sm mb-4">Up to 12 associates with the highest total hours · Full values in the table below</p><div style={{height:220}}><canvas ref={canvas} role="img" aria-label="Production hours by associate. Exact values are available in the associate rollup table."/></div></section>;
+}
+const columns=[['week','Week'],['day','Date'],['aa',"AA'ID"],['jobs','Jobs'],['in_progress','In Progress'],['ph','PH (hrs)',2],['minutes','SPL (min)',2],['final','Final shapes'],['person','Person'],['robot','Robot'],['frames','Frames'],['pre','Pre-labeled'],['added','Added'],['deleted','Deleted'],['spl','SPL/Label (sec)',2]];
+function Rollups({rows,onJobs,onRaw}){
+  const [sort,setSort]=useState({key:'day',dir:-1}),[page,setPage]=useState(1);
+  useEffect(()=>setPage(1),[rows,sort]);
+  const sorted=[...rows].sort((a,b)=>{const x=a[sort.key],y=b[sort.key];return sort.dir*(typeof x==='number'&&typeof y==='number'?x-y:String(x??'').localeCompare(String(y??'')))});
+  return <section className="card overflow-hidden"><div className="p-5 border-b"><h2 className="text-lg font-bold">Associate rollup <span className="muted font-normal">({rows.length})</span></h2><p className="muted text-sm">One row per associate and date. Select a column heading to sort.</p></div><div className="scroll"><table aria-label="Associate daily rollup"><thead><tr>{columns.map(([k,label])=><th scope="col" key={k} aria-sort={sort.key===k?(sort.dir===1?'ascending':'descending'):'none'}><button onClick={()=>setSort({key:k,dir:sort.key===k?-sort.dir:1})}>{label} {sort.key===k?(sort.dir===1?'↑':'↓'):'↕'}</button></th>)}<th scope="col">Actions</th></tr></thead><tbody>{sorted.slice((page-1)*25,page*25).map(r=><tr key={r.day+r.aa}>{columns.map(([k,,d])=><td key={k}>{['week','day','aa'].includes(k)?r[k]:fmt(r[k],d||0)}</td>)}<td><div className="flex gap-2"><button className="btn" onClick={()=>onJobs(r)}>View Jobs</button><button className="btn" onClick={()=>onRaw(r)}><Icon name="Download"/> Download Raw CSV</button></div></td></tr>)}</tbody></table></div>{!rows.length&&<div className="text-center p-10"><h3 className="font-bold">No matching activity</h3><p className="muted">Adjust the filters or upload a daily tracker.</p></div>}<Pager page={page} setPage={setPage} total={rows.length}/></section>;
+}
+function ExportForm({options,day,week,onExport,busy}){
+  const latest=day||options.dates[0]||new Date().toLocaleDateString('en-CA');
+  const [mode,setMode]=useState(week?'week':'date'),[dateValue,setDateValue]=useState(latest),[weekValue,setWeekValue]=useState(String(week||options.weeks[0]||1)),[yearValue,setYearValue]=useState(latest.slice(0,4)),[monthValue,setMonthValue]=useState(latest.slice(0,7)),[error,setError]=useState('');
+  async function submit(e){e.preventDefault();setError('');const selection=mode==='date'?{day:dateValue}:mode==='week'?{week:weekValue,year:yearValue}:{month:monthValue};try{await onExport(selection)}catch(e){setError(e.message)}}
+  return <form onSubmit={submit} className="space-y-4"><p className="muted">Export all associates and all job statuses for the selected period, including recorded production hours and in-progress counts.</p><label className="field">Report period<select value={mode} disabled={busy} onChange={e=>setMode(e.target.value)}><option value="date">Date</option><option value="week">Work week</option><option value="month">Month</option></select></label>{mode==='date'?<label className="field">Select date<input required type="date" value={dateValue} disabled={busy} onChange={e=>setDateValue(e.target.value)}/></label>:mode==='week'?<><div className="grid grid-cols-2 gap-4"><label className="field">Work week<input required type="number" min="1" max="53" value={weekValue} disabled={busy} onChange={e=>setWeekValue(e.target.value)}/></label><label className="field">Year<input required type="number" min="1" max="9999" value={yearValue} disabled={busy} onChange={e=>setYearValue(e.target.value)}/></label></div><p className="muted text-sm">Uses the CSV Work Week and the calendar year of the CSV Date.</p></>:<label className="field">Select month<input required type="month" value={monthValue} disabled={busy} onChange={e=>setMonthValue(e.target.value)}/></label>}{error&&<p role="alert" className="text-red-700">{error}</p>}<button className="btn primary" type="submit" disabled={busy}><Icon name="Download"/>{busy?'Preparing report…':'Download Excel report'}</button></form>;
+}
+function CarryOver({preview,busy,onApply,onDraftChange}){
+  const [selected,setSelected]=useState(''),[minutes,setMinutes]=useState('0'),[target,setTarget]=useState('');
+  const key=r=>JSON.stringify([r.source_date,r.aa,r.job]);
+  useEffect(()=>{setSelected('');onDraftChange(false)},[preview]);
+  const row=preview.rows.find(r=>key(r)===selected);
+  function choose(value){setSelected(value);onDraftChange(!!value);const r=preview.rows.find(r=>key(r)===value);if(!r)return;const prior=preview.adjustments.find(a=>a.source_date===r.source_date&&a.aa===r.aa&&a.job===r.job);setTarget(prior?.date||preview.suggested_date||r.source_date);setMinutes(String(prior?.subtract||0))}
+  function apply(e){e.preventDefault();if(!row)return;const rest=preview.adjustments.filter(a=>!(a.source_date===row.source_date&&a.aa===row.aa&&a.job===row.job));onApply([...rest,{source_date:row.source_date,aa:row.aa,job:row.job,date:target,subtract:minutes}])}
+  return <section className="card p-4 space-y-3"><h3 className="font-bold text-lg">Optional: subtract yesterday’s time</h3><p className="muted">For a continued job, choose its Job ID, the date to count it on, and minutes already counted yesterday. Example: 15 CSV minutes − 10 yesterday = 5 minutes today. The reporting date defaults to the latest date in this file. Check it before applying. Unselected jobs keep their CSV dates and time.</p><form onSubmit={apply} className="space-y-3"><label className="field">Job ID to adjust<select value={selected} disabled={busy} onChange={e=>choose(e.target.value)}><option value="">Select a job (optional)</option>{preview.rows.map(r=><option key={key(r)} value={key(r)}>{r.job} · {r.aa} · CSV date {r.source_date} · {fmt(r.original_minutes,2)} min</option>)}</select></label>{row&&<><div className="grid grid-cols-1 sm:grid-cols-2 gap-3"><label className="field">Count this job on<input type="date" required min={row.source_date} value={target} disabled={busy} onChange={e=>setTarget(e.target.value)}/></label><label className="field">Yesterday’s minutes to subtract<input type="number" required min="0" max={row.original_minutes} step="any" value={minutes} disabled={busy} onChange={e=>setMinutes(e.target.value)}/></label></div><p>Remaining time: <strong>{fmt(row.original_minutes-Number(minutes),2)} minutes</strong></p><button type="submit" className="btn" disabled={busy}>Apply adjustment to preview</button> <button type="button" className="btn" disabled={busy} onClick={()=>choose('')}>Cancel edit</button></>}</form>{preview.adjustments.length>0&&<ul className="divide-y">{preview.adjustments.map((a,i)=><li key={i} className="py-2 flex flex-wrap items-center justify-between gap-2"><span>Job {a.job} · {a.aa}: subtract {fmt(a.subtract,2)} min; count on {a.date}</span><button className="btn" disabled={busy} onClick={()=>onApply(preview.adjustments.filter((_,n)=>n!==i))}>Remove adjustment</button></li>)}</ul>}</section>;
+}
+function UploadPreview({preview,file,busy,error,onConfirm,onCancel,onAdjust}){
+  const [page,setPage]=useState(1),[draft,setDraft]=useState(false);
+  return <div className="space-y-4"><p className="font-semibold break-all">{file.name}</p><CarryOver preview={preview} busy={busy} onApply={onAdjust} onDraftChange={setDraft}/><p className="muted">Nothing has been saved yet. Review the file, then confirm. PH below includes any carry-over adjustments applied in this preview. Matching date, associate and job IDs are updated on confirmation.</p>{preview.dates.length>1&&<p role="status" className="bg-amber-50 border border-amber-300 rounded p-3">This file contains multiple dates. Each job keeps its CSV date unless you apply a carry-over adjustment.</p>}<p><strong>Dates:</strong> {preview.dates.join(', ')||'None'}<br/><strong>Associates:</strong> {preview.associates.join(', ')||'None'}</p><div className="grid grid-cols-2 md:grid-cols-4 gap-3">{[['Jobs',preview.summary.jobs],['PH',fmt(preview.summary.ph,2)],['Jobs to add',preview.inserted],['Jobs to update',preview.updated]].map(([label,value])=><div className="card p-3" key={label}><p className="muted">{label}</p><strong className="text-xl">{value}</strong></div>)}</div><p className="muted">{preview.skipped} marked duplicates skipped · {preview.collapsed} repeated keys collapsed (last row wins). Updates replace the matching date, associate and job record. Counts are rechecked when saving.</p><div className="scroll"><table aria-label="Upload preview"><thead><tr>{['Action','Reporting date','CSV date','Associate','Job ID','Status','CSV minutes','Subtracted min','Counted minutes'].map(x=><th key={x} scope="col">{x}</th>)}</tr></thead><tbody>{preview.rows.slice((page-1)*25,page*25).map(r=><tr key={[r.day,r.aa,r.job].join('|')}><td className={r.action==='Update'?'font-bold text-amber-800':'text-green-800'}>{r.action}</td><td>{r.day}</td><td>{r.source_date}</td><td>{r.aa}</td><td>{r.job}</td><td>{r.status}</td><td>{fmt(r.original_minutes,2)}</td><td>{fmt(r.subtracted,2)}</td><td>{fmt(r.minutes,2)}</td></tr>)}</tbody></table></div><Pager page={page} setPage={setPage} total={preview.rows.length}/>{error&&<p role="alert" className="text-red-700">{error}</p>}<div className="flex gap-3"><button className="btn" disabled={busy} onClick={onCancel}>Cancel</button><button className="btn primary" disabled={busy||draft} onClick={onConfirm}>{busy?'Saving…':draft?'Apply or cancel job edit first':'Confirm import'}</button></div></div>;
+}
+function Changes(){
+  const [open,setOpen]=useState(false),[page,setPage]=useState(1),[data,setData]=useState(null),[error,setError]=useState('');
+  useEffect(()=>{if(!open)return;const controller=new AbortController();setData(null);setError('');api('/api/changes?page='+page,{signal:controller.signal}).then(setData).catch(e=>{if(e.name!=='AbortError')setError(e.message)});return()=>controller.abort()},[open,page]);
+  return <><button className="btn" onClick={()=>{setPage(1);setOpen(true)}}><Icon name="History"/> Changes</button>{open&&<Modal title="Changes done" onClose={()=>setOpen(false)}><p className="muted mb-4">Upload, update and deletion history from when this feature was enabled. No information identifying who made a change is recorded or displayed.</p>{error?<p role="alert" className="text-red-700">{error}</p>:!data?<p role="status">Loading changes…</p>:<><div className="scroll"><table aria-label="Changes done"><thead><tr><th scope="col">When</th><th scope="col">Change</th><th scope="col">Work date</th><th scope="col">Details</th></tr></thead><tbody>{data.rows.map((r,i)=><tr key={i}><td>{new Date(r.created).toLocaleString()}</td><td>{r.action}</td><td>{r.work_day||'Original CSV dates'}</td><td style={{whiteSpace:'normal',minWidth:240}}>{r.detail}</td></tr>)}</tbody></table></div>{!data.total&&<p className="p-5 muted">No changes recorded yet.</p>}<Pager page={page} setPage={setPage} total={data.total}/></>}</Modal>}</>;
+}
+function App(){
+  const [role,setRole]=useState('associate'),[options,setOptions]=useState({dates:[],weeks:[],associates:[]}),[ready,setReady]=useState(false);
+  const [day,setDay]=useState(''),[week,setWeek]=useState(''),[associate,setAssociate]=useState(''),[managerAA,setManagerAA]=useState('');
+  const [data,setData]=useState(null),[loading,setLoading]=useState(false),[error,setError]=useState(''),[notice,setNotice]=useState(''),[busy,setBusy]=useState(false),[drag,setDrag]=useState(false),[revision,setRevision]=useState(0),[modal,setModal]=useState(null);
+  const fileRef=useRef();
+  const filters={day,week,aa:role==='associate'?associate:managerAA,status:'all'};
+  const filterKey=query(filters);
+  async function loadOptions(initial=false){const o=await api('/api/options');setOptions(o);if(initial){setDay('');setAssociate(o.associates[0]||'')}setReady(true);return o}
+  useEffect(()=>{loadOptions(true).catch(e=>setError(e.message))},[]);
+  useEffect(()=>{if(!ready)return;const controller=new AbortController();setLoading(true);setError('');setData(null);if(role==='associate'&&!associate){setLoading(false);return()=>controller.abort()}api('/api/dashboard?'+filterKey,{signal:controller.signal}).then(setData).catch(e=>{if(e.name!=='AbortError')setError(e.message)}).finally(()=>{if(!controller.signal.aborted)setLoading(false)});return()=>controller.abort()},[filterKey,role,ready,revision]);
+  async function upload(file,confirmed=false,adjustments=[]){
+    if(!file||busy)return;
+    if(!/\.(csv|xlsx)$/i.test(file.name)||file.size>10*1024*1024){setError('Choose a CSV or XLSX file no larger than 10 MB.');return}
+    setBusy(true);setError('');setNotice('');
+    try{const form=new FormData();form.append('file',file);form.append('adjustments',JSON.stringify(adjustments));if(!confirmed){const preview=await api('/api/upload?preview=true',{method:'POST',body:form});setModal({kind:'preview',file,preview});return}const result=await api('/api/upload',{method:'POST',body:form});setModal(null);await loadOptions();if(result.associates.length===1)setAssociate(result.associates[0]);setDay('');setWeek('');setRevision(x=>x+1);setNotice(`Import complete: ${result.inserted} inserted, ${result.updated} updated, ${result.skipped} marked duplicates skipped, ${result.collapsed} repeated keys collapsed (last row wins).`)}catch(e){setError(e.message)}finally{setBusy(false);if(fileRef.current)fileRef.current.value=''}
+  }
+  async function exportReport(selection){
+    setBusy(true);setError('');
+    try{const blob=await LocalTracker.request('/api/export?'+query({...selection,status:'all'})),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='JustWalk_Manager_'+(selection.day||selection.month||('Week_'+selection.week+'_'+selection.year))+'.xlsx';document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);setModal(null);setNotice('Manager summary exported for the selected period.')}catch(e){throw e}finally{setBusy(false)}
+  }
+  const s=data?.summary;
+  const cards=s?(role==='manager'?[['Active associates',fmt(s.associates),'Unique associates in this selection'],['Jobs in progress',fmt(s.in_progress),'Across the selected dates and associates'],['Team production hours',fmt(s.ph,2),`Average ${fmt(s.avg_ph,2)} hrs / active associate`],['Total jobs',fmt(s.jobs),`${fmt(s.frames)} total frames`],['Shapes annotated',fmt(s.person+s.robot),`${fmt(s.person)} Person + ${fmt(s.robot)} Robot`],['Team SPL / label',fmt(s.spl,2),'Seconds · weighted by final shape count']]:[['Production hours',fmt(s.ph,2),`${fmt(s.minutes,2)} production minutes`],['Total jobs',fmt(s.jobs),`${fmt(s.frames)} total frames`],['Final shapes',fmt(s.final),`${fmt(s.person)} Person · ${fmt(s.robot)} Robot`],['SPL / label',fmt(s.spl,2),'Seconds · weighted by final shape count']]):[];
+  return <><a href="#main" className="skip">Skip to main content</a><header style={{background:'#232F3E',borderBottom:'3px solid #FF9900'}} className="text-white px-5 md:px-8 py-4 flex flex-wrap items-center justify-between gap-4"><div className="flex items-center gap-3"><span style={{color:'#FF9900'}}><Icon name="Footprints"/></span><strong className="text-xl tracking-tight">JustWalk</strong><span className="hidden md:inline text-slate-300 border-l border-slate-500 pl-3">Browser workspace</span></div><label className="flex items-center gap-3 text-sm">Workspace view<select aria-label="Workspace view" className="rounded-md px-3 py-2 text-white border border-slate-500 bg-slate-700" value={role} onChange={e=>setRole(e.target.value)}><option value="associate">Associate View</option><option value="manager">Manager View</option></select></label></header>
+  <main id="main" className="max-w-[1600px] mx-auto p-4 md:p-8 space-y-6"><div className="flex justify-end"><Changes/></div><BrowserStorage onRefresh={async()=>{await loadOptions(true);setRevision(x=>x+1)}}/><div className="text-sm muted">JustWalk <span className="px-2">/</span> {role==='manager'?'Team overview':'My productivity'}</div><div className="flex flex-wrap justify-between items-start gap-4"><div><h1 className="text-2xl md:text-3xl font-bold">{role==='manager'?'Associate productivity':'Your daily productivity'}</h1><p className="muted mt-2">Associate Productivity &amp; CVAT Tracker</p></div>{role==='manager'&&<div className="flex flex-wrap gap-2"><button className="btn" onClick={()=>setModal({kind:'raw'})}><Icon name="Archive"/> Upload history</button><button className="btn primary" disabled={busy||loading||!data} onClick={()=>setModal({kind:'export'})}><Icon name="Download"/> {busy?'Preparing…':'Export Manager Summary (.xlsx)'}</button></div>}</div>
+  {error&&<div role="alert" className="rounded-lg border border-red-300 bg-red-50 p-4 flex justify-between gap-4"><span className="text-red-900 break-words">{error}</span><button className="btn" onClick={()=>{setError('');if(!ready)loadOptions(true).catch(e=>setError(e.message));else setRevision(x=>x+1)}}>Retry</button></div>}{notice&&<div role="status" className="rounded-lg border border-green-300 bg-green-50 p-4 text-green-900">{notice}</div>}
+  {role==='associate'&&<section className="card p-5"><h2 className="text-lg font-bold mb-3">Upload daily tracker</h2><div onDragOver={e=>{e.preventDefault();setDrag(true)}} onDragLeave={()=>setDrag(false)} onDrop={e=>{e.preventDefault();setDrag(false);if(e.dataTransfer.files.length!==1){setError('Upload one file at a time.');return}upload(e.dataTransfer.files[0])}} className="border-2 border-dashed rounded-lg p-6 text-center" style={{borderColor:drag?'#0972d3':'#aab7b8',background:drag?'#f0f7ff':'#fafafa'}}><Icon name="UploadCloud"/><h3 className="font-semibold mt-2">{busy?'Processing your tracker…':'Drop your daily tracker here'}</h3><p className="muted text-sm mt-1 mb-4">UTF-8 CSV or XLSX · 22 required columns · Up to 10 MB / 50,000 rows</p><input ref={fileRef} type="file" accept=".csv,.xlsx" className="hidden" aria-label="Daily tracker file" onChange={e=>upload(e.target.files[0])}/><button disabled={busy} className="btn" onClick={()=>fileRef.current.click()}>Choose file</button></div><p className="muted text-xs mt-3">Re-uploading updates matching date, associate and job IDs. Rows marked Duplicate = Yes are skipped. Original files are retained.</p></section>}
+  <section className="card p-5" aria-label="Dashboard filters"><div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4"><label className="field">Date<input type="date" value={day} onChange={e=>{setDay(e.target.value);setWeek('')}}/></label><label className="field">Work week<select value={week} onChange={e=>{setWeek(e.target.value);setDay('')}}><option value="">All weeks</option>{options.weeks.map(w=><option key={w} value={w}>Week {w}</option>)}</select></label><label className="field">{role==='associate'?"Your AA'ID":"Associate (AA'ID)"}<select value={role==='associate'?associate:managerAA} onChange={e=>role==='associate'?setAssociate(e.target.value):setManagerAA(e.target.value)}>{role==='manager'?<option value="">All associates</option>:<option value="" disabled>Select associate</option>}{options.associates.map(a=><option key={a}>{a}</option>)}</select></label><div className="flex items-end"><button className="btn" onClick={()=>{setDay('');setWeek('');setManagerAA('')}}><Icon name="RotateCcw"/> Reset filters</button></div></div><p className="muted text-xs mt-3">{day?`Daily view: ${day}`:week?`Weekly view: week ${week} across all stored years`:'All stored dates'} · Dates and SPL come from the CSV, with any carry-over adjustments you confirmed. All job statuses count toward totals. Leave Date and Work week empty to see every uploaded date. Avg PH = total PH ÷ unique active associates. Zero-label SPL is shown as —.</p></section>
+  {loading&&<div className="card p-8 text-center muted" role="status">Loading productivity data…</div>}
+  {!loading&&s&&<><section className={`grid gap-4 grid-cols-1 sm:grid-cols-2 ${role==='manager'?'xl:grid-cols-6':'xl:grid-cols-4'}`} aria-label="Productivity summary">{cards.map(([label,value,description])=><article className="card p-5" key={label}><h2 className="muted font-semibold text-sm">{label}</h2><p className="text-3xl font-bold my-3 tabular-nums">{value}</p><p className="muted text-xs">{description}</p></article>)}</section><section className="card p-5"><h2 className="font-bold text-lg mb-2">Job status breakdown</h2><p className="muted mb-4">Select a count to view matching jobs. All statuses continue to count toward jobs and PH above.</p><div className="flex flex-wrap gap-3">{[['new','New',s.new],['in progress','In Progress',s.in_progress],['completed','Completed',s.completed]].map(([status,label,count])=><button key={status} className="btn" onClick={()=>setModal({kind:'status',label,filters:{...filters,status}})}>{label}: {fmt(count)}</button>)}{s.other>0&&<span className="muted">Other statuses: {fmt(s.other)}</span>}</div></section>{role==='manager'?<>{data.rollups.length>0&&<ChartPanel rows={data.rollups}/>}<Rollups rows={data.rollups} onJobs={r=>setModal({kind:'jobs',group:r})} onRaw={r=>setModal({kind:'raw',group:{day:r.day,aa:r.aa}})}/></>:<section className="card overflow-hidden"><div className="p-5 border-b flex flex-wrap gap-3 justify-between items-center"><h2 className="font-bold text-lg">Your CVAT jobs</h2><button className="btn" onClick={()=>setModal({kind:'raw',group:{aa:associate,...(day?{day}:{})}})}>Original uploads</button></div><Jobs filters={filters} revision={revision}/></section>}</>}
+  {!loading&&ready&&role==='associate'&&!associate&&<section className="card p-10 text-center"><h2 className="font-bold text-lg">Start with your daily tracker</h2><p className="muted mt-2">Upload a file to see your productivity and CVAT jobs.</p></section>}
+  <footer className="muted text-xs py-2">JustWalk Browser Edition · Records stay in this browser. Download backups regularly. Internet is required to load interface libraries.</footer></main>
+  {modal&&<Modal title={modal.kind==='preview'?'Review upload':modal.kind==='status'?modal.label+' jobs':modal.kind==='export'?'Export Manager Summary':modal.kind==='jobs'?`CVAT jobs · ${modal.group.aa} · ${modal.group.day}`:'Download original uploads'} onClose={()=>{if(!busy)setModal(null)}}>{modal.kind==='preview'?<UploadPreview preview={modal.preview} file={modal.file} busy={busy} error={error} onCancel={()=>setModal(null)} onConfirm={()=>upload(modal.file,true,modal.preview.adjustments)} onAdjust={changes=>upload(modal.file,false,changes)}/>:modal.kind==='status'?<Jobs filters={modal.filters}/>:modal.kind==='export'?<ExportForm options={options} day={day} week={week} busy={busy} onExport={exportReport}/>:modal.kind==='jobs'?<Jobs filters={{day:modal.group.day,aa:modal.group.aa,week,status:'all'}}/>:<RawFiles group={modal.group} onDeleted={async name=>{setNotice('');const o=await loadOptions();if(!o.associates.includes(associate))setAssociate(o.associates[0]||'');if(!o.associates.includes(managerAA))setManagerAA('');setRevision(x=>x+1)}}/>}</Modal>}</>;
+}
+class ErrorBoundary extends React.Component{constructor(props){super(props);this.state={failed:false}}static getDerivedStateFromError(){return{failed:true}}render(){return this.state.failed?<div style={{padding:32}}><h1>JustWalk could not display this page.</h1><p>Check your connection and reload.</p><button onClick={()=>location.reload()}>Reload page</button></div>:this.props.children}}
+ReactDOM.createRoot(document.getElementById('root')).render(<ErrorBoundary><App/></ErrorBoundary>);
+</script>
+</body>
+</html>
